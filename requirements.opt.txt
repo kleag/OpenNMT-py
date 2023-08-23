@@ -5,3 +5,5 @@ subword-nmt>=0.3.7
 rapidfuzz
 scipy
 bitsandbytes>=0.39.0
+safetensors
+spacy

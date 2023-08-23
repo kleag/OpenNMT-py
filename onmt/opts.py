@@ -56,20 +56,6 @@ def _add_logging_opts(parser, is_train=True):
 
     if is_train:
         group.add(
-            "--train_eval_steps",
-            "-train_eval_steps",
-            type=int,
-            default=200,
-            help="calculate training metrics at this interval",
-        )
-        group.add(
-            "--train_metrics",
-            "-train_metrics",
-            default=[],
-            nargs="+",
-            help="List of names of additional training metrics",
-        )
-        group.add(
             "--valid_metrics",
             "-valid_metrics",
             default=[],
@@ -330,7 +316,7 @@ def _add_dynamic_vocab_opts(parser, build_vocab_only=False):
     )
     group.add(
         "--default_specials",
-        "-default_specilas",
+        "-default_specials",
         nargs="+",
         type=str,
         default=[
@@ -451,6 +437,62 @@ def dynamic_prepare_opts(parser, build_vocab_only=False):
     if build_vocab_only:
         _add_reproducibility_opts(parser)
         # as for False, this will be added in _add_train_general_opts
+
+
+def distributed_opts(parser):
+    # GPU
+    group = parser.add_argument_group("Distributed")
+    group.add(
+        "--gpu_ranks",
+        "-gpu_ranks",
+        default=[],
+        nargs="*",
+        type=int,
+        help="list of ranks of each process.",
+    )
+    group.add(
+        "--world_size",
+        "-world_size",
+        default=1,
+        type=int,
+        help="total number of distributed processes.",
+    )
+    group.add(
+        "--parallel_mode",
+        "-parallel_mode",
+        default="data_parallel",
+        choices=["tensor_parallel", "data_parallel"],
+        type=str,
+        help="Distributed mode.",
+    )
+    group.add(
+        "--gpu_backend",
+        "-gpu_backend",
+        default="nccl",
+        type=str,
+        help="Type of torch distributed backend",
+    )
+    group.add(
+        "--gpu_verbose_level",
+        "-gpu_verbose_level",
+        default=0,
+        type=int,
+        help="Gives more info on each process per GPU.",
+    )
+    group.add(
+        "--master_ip",
+        "-master_ip",
+        default="localhost",
+        type=str,
+        help="IP of master for torch.distributed training.",
+    )
+    group.add(
+        "--master_port",
+        "-master_port",
+        default=10000,
+        type=int,
+        help="Port of master for torch.distributed training.",
+    )
 
 
 def model_opts(parser):
@@ -670,6 +712,9 @@ def model_opts(parser):
         " normalization in the transformer architecture. Choices are"
         " standard or rms. Default to standard",
     )
+    group.add(
+        "--norm_eps", "-norm_eps", type=float, default=1e-6, help="Layer norm epsilon"
+    )
 
     group.add(
         "--pos_ffn_activation_fn",
@@ -808,6 +853,14 @@ def model_opts(parser):
         "Maximum distance between inputs in relative "
         "positions representations. "
         "more info: https://arxiv.org/pdf/1803.02155.pdf",
+    )
+    group.add(
+        "--relative_positions_buckets",
+        "-relative_positions_buckets",
+        type=int,
+        default=0,
+        help="This setting enable relative position bias"
+        "more info: https://github.com/google-research/text-to-text-transfer-transformer",
     )
     group.add(
         "--heads",
@@ -1027,6 +1080,14 @@ def _add_train_general_opts(parser):
     )
 
     group.add(
+        "--save_format",
+        "-save_format",
+        default="pytorch",
+        choices=["pytorch", "safetensors"],
+        help="Format to save the model weights",
+    )
+
+    group.add(
         "--save_checkpoint_steps",
         "-save_checkpoint_steps",
         type=int,
@@ -1039,51 +1100,6 @@ def _add_train_general_opts(parser):
         type=int,
         default=-1,
         help="Keep X checkpoints (negative: keep all)",
-    )
-
-    # GPU
-    group.add(
-        "--gpu_ranks",
-        "-gpu_ranks",
-        default=[],
-        nargs="*",
-        type=int,
-        help="list of ranks of each process.",
-    )
-    group.add(
-        "--world_size",
-        "-world_size",
-        default=1,
-        type=int,
-        help="total number of distributed processes.",
-    )
-    group.add(
-        "--gpu_backend",
-        "-gpu_backend",
-        default="nccl",
-        type=str,
-        help="Type of torch distributed backend",
-    )
-    group.add(
-        "--gpu_verbose_level",
-        "-gpu_verbose_level",
-        default=0,
-        type=int,
-        help="Gives more info on each process per GPU.",
-    )
-    group.add(
-        "--master_ip",
-        "-master_ip",
-        default="localhost",
-        type=str,
-        help="IP of master for torch.distributed training.",
-    )
-    group.add(
-        "--master_port",
-        "-master_port",
-        default=10000,
-        type=int,
-        help="Port of master for torch.distributed training.",
     )
 
     # LoRa
@@ -1123,24 +1139,6 @@ def _add_train_general_opts(parser):
         type=float,
         default=0.0,
         help="rule of thumb: same value as in main model",
-    )
-
-    group.add(
-        "--quant_layers",
-        "-quant_layers",
-        default=[],
-        nargs="+",
-        type=str,
-        help="list of layers to be compressed in 4/8bit.",
-    )
-
-    group.add(
-        "--quant_type",
-        "-quant_type",
-        default="bnb_8bit",
-        choices=["bnb_8bit", "bnb_FP4", "bnb_NF4"],
-        type=str,
-        help="Type of compression.",
     )
 
     _add_reproducibility_opts(parser)
@@ -1525,14 +1523,37 @@ def _add_train_dynamic_data(parser):
     )
 
 
+def _add_quant_opts(parser):
+    group = parser.add_argument_group("Quant options")
+    group.add(
+        "--quant_layers",
+        "-quant_layers",
+        default=[],
+        nargs="+",
+        type=str,
+        help="list of layers to be compressed in 4/8bit.",
+    )
+
+    group.add(
+        "--quant_type",
+        "-quant_type",
+        default="bnb_8bit",
+        choices=["bnb_8bit", "bnb_FP4", "bnb_NF4"],
+        type=str,
+        help="Type of compression.",
+    )
+
+
 def train_opts(parser):
     """All options used in train."""
     # options relate to data preprare
     dynamic_prepare_opts(parser, build_vocab_only=False)
+    distributed_opts(parser)
     # options relate to train
     model_opts(parser)
     _add_train_general_opts(parser)
     _add_train_dynamic_data(parser)
+    _add_quant_opts(parser)
 
 
 def _add_decoding_opts(parser):
@@ -1795,6 +1816,8 @@ def translate_opts(parser, dynamic=False):
     # Adding option for logging
     _add_logging_opts(parser, is_train=False)
 
+    distributed_opts(parser)
+
     group = parser.add_argument_group("Efficiency")
     group.add("--batch_size", "-batch_size", type=int, default=30, help="Batch size")
     group.add(
@@ -1819,6 +1842,8 @@ def translate_opts(parser, dynamic=False):
 
         # Adding options related to Transforms
         _add_dynamic_transform_opts(parser)
+
+    _add_quant_opts(parser)
 
 
 # Copyright 2016 The Chromium Authors. All rights reserved.

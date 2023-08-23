@@ -2,9 +2,6 @@
 This file is for models creation, which consults options
 and creates each encoder and decoder accordingly.
 """
-import re
-import os
-import importlib
 import torch
 import torch.nn as nn
 from torch.nn.init import xavier_uniform_, zeros_, uniform_
@@ -90,12 +87,30 @@ def build_decoder(opt, embeddings):
     return str2dec[dec_type].from_opt(opt, embeddings)
 
 
-def load_test_model(opt, model_path=None):
+def load_test_model(opt, device_id=0, model_path=None):
     if model_path is None:
         model_path = opt.models[0]
     checkpoint = load_checkpoint(model_path)
 
     model_opt = ArgumentParser.ckpt_model_opts(checkpoint["opt"])
+
+    model_opt.quant_layers = opt.quant_layers
+    model_opt.quant_type = opt.quant_type
+
+    if opt.world_size > 1 and opt.parallel_mode == "tensor_parallel":
+        model_opt.world_size = opt.world_size
+        model_opt.parallel_mode = opt.parallel_mode
+        model_opt.gpu_ranks = opt.gpu_ranks
+        device = torch.device("cuda", device_id)
+    else:
+        if use_gpu(opt):
+            if len(opt.gpu_ranks) > 0:
+                device_id = opt.gpu_ranks[0]
+            elif opt.gpu > -1:
+                device_id = opt.gpu
+            device = torch.device("cuda", device_id)
+        else:
+            device = torch.device("cpu")
 
     ArgumentParser.update_model_opts(model_opt)
     ArgumentParser.validate_model_opts(model_opt)
@@ -106,23 +121,37 @@ def load_test_model(opt, model_path=None):
 
     model = build_base_model(model_opt, vocabs)
 
-    model.load_state_dict(
-        checkpoint, precision=torch.float32, device=torch.device("cpu"), strict=True
-    )
+    precision = torch.float32
 
-    del checkpoint
-
-    if opt.precision == "fp32":
-        model.float()
-    elif opt.precision == "fp16":
-        model.half()
+    if opt.precision == "fp16":
+        precision = torch.float16
     elif opt.precision == "int8":
         if opt.gpu >= 0:
             raise ValueError("Dynamic 8-bit quantization is not supported on GPU")
-        torch.quantization.quantize_dynamic(model, inplace=True)
+        else:
+            precision = torch.int8
 
-    if use_gpu(opt) and opt.gpu >= 0:
-        model.to(torch.device("cuda", opt.gpu))
+    logger.info("Loading data into the model")
+    if "model" in checkpoint.keys():
+        # weights are in the .pt file
+        model.load_state_dict(
+            checkpoint,
+            precision=precision,
+            device=device,
+            strict=True,
+            device_id=device_id,
+        )
+    else:
+        # weights are not in the .pt checkpoint but stored in the safetensors file
+        base_name = model_path[:-3] if model_path[-3:] == ".pt" else model_path
+        model.load_safe_state_dict(
+            base_name,
+            precision=precision,
+            device=device,
+            strict=True,
+            device_id=device_id,
+        )
+    del checkpoint
 
     model.eval()
     model.generator.eval()
@@ -255,8 +284,6 @@ def build_base_model(model_opt, vocabs):
                 "%s compression of layer %s" % (model_opt.quant_type, nonlora_to_quant)
             )
             try:
-                os.environ["BITSANDBYTES_NOWELCOME"] = "1"
-                import bitsandbytes as bnb
                 from onmt.modules.bnb_linear import replace_bnb_linear
             except ImportError:
                 raise ImportError("Install bitsandbytes to use 4/8bit compression")
@@ -366,18 +393,39 @@ def build_model(model_opt, opt, vocabs, checkpoint):
 
     if checkpoint is not None:
         if model_opt.update_vocab:
-            # Update model embeddings with those from the checkpoint
-            # after initialization
-            use_embeddings_from_checkpoint(vocabs, model, checkpoint)
-            # after this checkpoint contains no embeddings
+            if "model" in checkpoint.keys():
+                # Update model embeddings with those from the checkpoint
+                # after initialization
+                use_embeddings_from_checkpoint(vocabs, model, checkpoint)
+                # after this checkpoint contains no embeddings
+            else:
+                raise ValueError(
+                    "Update Vocab is not compatible with safetensors mode (yet"
+                )
 
         # when using LoRa or updating the vocab (no more embeddings in ckpt)
         # => strict=False when loading state_dict
         strict = not model_opt.update_vocab
 
-        model.load_state_dict(
-            checkpoint, precision=precision, device=device, strict=strict
-        )
+        if "model" in checkpoint.keys():
+            # weights are in the .pt file
+            model.load_state_dict(
+                checkpoint,
+                precision=precision,
+                device=device,
+                strict=strict,
+            )
+        else:
+            # weights are not in the .pt checkpoint but stored in the safetensors file
+            model_path = (
+                opt.train_from[:-3] if opt.train_from[-3:] == ".pt" else opt.train_from
+            )
+            model.load_safe_state_dict(
+                model_path,
+                precision=precision,
+                device=device,
+                strict=strict,
+            )
     else:
         model.to(precision)
         model.to(device)

@@ -23,6 +23,7 @@ class TransformerDecoderLayerBase(nn.Module):
         attention_dropout,
         self_attn_type="scaled-dot",
         max_relative_positions=0,
+        relative_positions_buckets=0,
         aan_useffn=False,
         full_context_alignment=False,
         alignment_heads=0,
@@ -33,7 +34,9 @@ class TransformerDecoderLayerBase(nn.Module):
         parallel_residual=False,
         shared_layer_norm=False,
         layer_norm="standard",
+        norm_eps=1e-6,
         use_ckpting=[],
+        parallel_gpu=1,
     ):
         """
         Args:
@@ -62,6 +65,7 @@ class TransformerDecoderLayerBase(nn.Module):
                 activation function choice for PositionwiseFeedForward layer
             add_qkvbias (bool): whether to add bias to the Key/Value nn.Linear
             layer_norm (string): type of layer normalization standard/rms
+            norm_eps (float): layer norm epsilon
 
         """
         super(TransformerDecoderLayerBase, self).__init__()
@@ -73,10 +77,12 @@ class TransformerDecoderLayerBase(nn.Module):
                 d_model,
                 dropout=attention_dropout,
                 max_relative_positions=max_relative_positions,
+                relative_positions_buckets=relative_positions_buckets,
                 attn_type="self",
                 add_qkvbias=add_qkvbias,
                 num_kv=num_kv,
                 use_ckpting=use_ckpting,
+                parallel_gpu=parallel_gpu,
             )
         elif self_attn_type == "average":
             self.self_attn = AverageAttention(
@@ -91,18 +97,20 @@ class TransformerDecoderLayerBase(nn.Module):
             add_ffnbias,
             parallel_residual,
             layer_norm,
+            norm_eps,
             use_ckpting=use_ckpting,
+            parallel_gpu=parallel_gpu,
         )
         self.parallel_residual = parallel_residual
         self.shared_layer_norm = shared_layer_norm
         if layer_norm == "standard":
-            self.layer_norm_1 = nn.LayerNorm(d_model, eps=1e-6)
+            self.layer_norm_1 = nn.LayerNorm(d_model, eps=norm_eps)
             if parallel_residual and not shared_layer_norm:
-                self.layer_norm_res = nn.LayerNorm(d_model, eps=1e-6)
+                self.layer_norm_res = nn.LayerNorm(d_model, eps=norm_eps)
         elif layer_norm == "rms":
-            self.layer_norm_1 = RMSNorm(d_model, eps=1e-6)
+            self.layer_norm_1 = RMSNorm(d_model, eps=norm_eps)
             if parallel_residual and not shared_layer_norm:
-                self.layer_norm_res = RMSNorm(d_model, eps=1e-6)
+                self.layer_norm_res = RMSNorm(d_model, eps=norm_eps)
         else:
             raise ValueError(f"{layer_norm} layer norm type is not supported")
 
@@ -117,8 +125,9 @@ class TransformerDecoderLayerBase(nn.Module):
         full context alignement, :cite:`garg2019jointly`.
 
         Args:
-            * All arguments of _forward.
-            with_align (bool): whether return alignment attention.
+            * All arguments of _forward, of which
+            with_align (bool): needed to compute attn_align
+            return_attn (bool): to force MHA to return attns
 
         Returns:
             (FloatTensor, FloatTensor, FloatTensor or None):
@@ -129,7 +138,7 @@ class TransformerDecoderLayerBase(nn.Module):
         """
         with_align = kwargs.pop("with_align", False)
         layer_out, attns = self._forward(*args, **kwargs)
-        top_attn = attns[:, 0, :, :].contiguous()
+        top_attn = None if attns is None else attns[:, 0, :, :].contiguous()
         attn_align = None
         if with_align:
             if self.full_context_alignment:
@@ -172,10 +181,15 @@ class TransformerDecoderLayerBase(nn.Module):
             dec_mask = tgt_pad_mask
         return dec_mask
 
-    def _forward_self_attn(self, norm_layer_in, dec_mask, step):
+    def _forward_self_attn(self, norm_layer_in, dec_mask, step, return_attn=False):
         if self.self_attn_type == "scaled-dot":
             return self.self_attn(
-                norm_layer_in, norm_layer_in, norm_layer_in, mask=dec_mask, step=step
+                norm_layer_in,
+                norm_layer_in,
+                norm_layer_in,
+                mask=dec_mask,
+                step=step,
+                return_attn=return_attn,
             )
         elif self.self_attn_type == "average":
             return self.self_attn(norm_layer_in, mask=dec_mask, step=step)
@@ -201,6 +215,7 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
         attention_dropout,
         self_attn_type="scaled-dot",
         max_relative_positions=0,
+        relative_positions_buckets=0,
         aan_useffn=False,
         full_context_alignment=False,
         alignment_heads=0,
@@ -211,7 +226,9 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
         parallel_residual=False,
         shared_layer_norm=False,
         layer_norm="standard",
+        norm_eps=1e-6,
         use_ckpting=[],
+        parallel_gpu=1,
     ):
         """
         Args:
@@ -225,6 +242,7 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
             attention_dropout,
             self_attn_type,
             max_relative_positions,
+            relative_positions_buckets,
             aan_useffn,
             full_context_alignment,
             alignment_heads,
@@ -235,7 +253,9 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
             parallel_residual=parallel_residual,
             shared_layer_norm=shared_layer_norm,
             layer_norm=layer_norm,
+            norm_eps=norm_eps,
             use_ckpting=use_ckpting,
+            parallel_gpu=parallel_gpu,
         )
         self.context_attn = MultiHeadedAttention(
             heads,
@@ -245,11 +265,12 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
             add_qkvbias=add_qkvbias,
             num_kv=num_kv,
             use_ckpting=use_ckpting,
+            parallel_gpu=parallel_gpu,
         )
         if layer_norm == "standard":
-            self.layer_norm_2 = nn.LayerNorm(d_model, eps=1e-6)
+            self.layer_norm_2 = nn.LayerNorm(d_model, eps=norm_eps)
         elif layer_norm == "rms":
-            self.layer_norm_2 = RMSNorm(d_model, eps=1e-6)
+            self.layer_norm_2 = RMSNorm(d_model, eps=norm_eps)
         else:
             raise ValueError(f"{layer_norm} layer norm type is not supported")
 
@@ -265,6 +286,7 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
         tgt_pad_mask,
         step=None,
         future=False,
+        return_attn=False,
     ):
         """A naive forward pass for transformer decoder.
 
@@ -277,6 +299,7 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
             tgt_pad_mask (bool): ``(batch_size, 1, T)``
             step (int or None): stepwise decoding counter
             future (bool): If set True, do not apply future_mask.
+            return_attn (bool) : if set True requires attns output
 
         Returns:
             (FloatTensor, FloatTensor):
@@ -303,7 +326,11 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
 
         if self.parallel_residual:
             ctx_attn, attns = self.context_attn(
-                enc_out, enc_out, norm_layer_in, mask=src_pad_mask
+                enc_out,
+                enc_out,
+                norm_layer_in,
+                mask=src_pad_mask,
+                return_attn=return_attn,
             )
             # feed_forward applies residual, so we remove and apply residual with un-normed
             layer_out = (
@@ -317,7 +344,7 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
             query = self.dropout(self_attn) + layer_in
             norm_query = self.layer_norm_2(query)
             ctx_attn, attns = self.context_attn(
-                enc_out, enc_out, norm_query, mask=src_pad_mask
+                enc_out, enc_out, norm_query, mask=src_pad_mask, return_attn=return_attn
             )
             layer_out = self.feed_forward(self.dropout(ctx_attn) + query)
 
@@ -325,7 +352,9 @@ class TransformerDecoderLayer(TransformerDecoderLayerBase):
 
 
 class TransformerDecoderBase(DecoderBase):
-    def __init__(self, d_model, copy_attn, embeddings, alignment_layer, layer_norm):
+    def __init__(
+        self, d_model, copy_attn, embeddings, alignment_layer, layer_norm, norm_eps
+    ):
         super(TransformerDecoderBase, self).__init__()
 
         self.embeddings = embeddings
@@ -338,9 +367,9 @@ class TransformerDecoderBase(DecoderBase):
         # just reuses the context attention.
         self._copy = copy_attn
         if layer_norm == "standard":
-            self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
+            self.layer_norm = nn.LayerNorm(d_model, eps=norm_eps)
         elif layer_norm == "rms":
-            self.layer_norm = RMSNorm(d_model, eps=1e-6)
+            self.layer_norm = RMSNorm(d_model, eps=norm_eps)
         else:
             raise ValueError(f"{layer_norm} layer norm type is not supported")
 
@@ -362,6 +391,7 @@ class TransformerDecoderBase(DecoderBase):
             else opt.attention_dropout,
             embeddings,
             opt.max_relative_positions,
+            opt.relative_positions_buckets,
             opt.aan_useffn,
             opt.full_context_alignment,
             opt.alignment_layer,
@@ -373,7 +403,11 @@ class TransformerDecoderBase(DecoderBase):
             parallel_residual=opt.parallel_residual,
             shared_layer_norm=opt.shared_layer_norm,
             layer_norm=opt.layer_norm,
+            norm_eps=opt.norm_eps,
             use_ckpting=opt.use_ckpting,
+            parallel_gpu=opt.world_size
+            if opt.parallel_mode == "tensor_parallel"
+            else 1,
         )
 
     def init_state(self, src, enc_out, enc_final_hs):
@@ -428,6 +462,8 @@ class TransformerDecoder(TransformerDecoderBase):
             embeddings to use, should have positional encodings
         max_relative_positions (int):
             Max distance between inputs in relative positions representations
+        relative_positions_buckets (int):
+            Number of buckets when using relative position bias
         aan_useffn (bool): Turn on the FFN layer in the AAN decoder
         full_context_alignment (bool):
             whether enable an extra full context decoder forward for alignment
@@ -450,6 +486,7 @@ class TransformerDecoder(TransformerDecoderBase):
         attention_dropout,
         embeddings,
         max_relative_positions,
+        relative_positions_buckets,
         aan_useffn,
         full_context_alignment,
         alignment_layer,
@@ -461,10 +498,12 @@ class TransformerDecoder(TransformerDecoderBase):
         parallel_residual=False,
         shared_layer_norm=False,
         layer_norm="standard",
+        norm_eps=1e-6,
         use_ckpting=[],
+        parallel_gpu=1,
     ):
         super(TransformerDecoder, self).__init__(
-            d_model, copy_attn, embeddings, alignment_layer, layer_norm
+            d_model, copy_attn, embeddings, alignment_layer, layer_norm, norm_eps
         )
 
         self.transformer_layers = nn.ModuleList(
@@ -477,6 +516,7 @@ class TransformerDecoder(TransformerDecoderBase):
                     attention_dropout,
                     self_attn_type=self_attn_type,
                     max_relative_positions=max_relative_positions,
+                    relative_positions_buckets=relative_positions_buckets,
                     aan_useffn=aan_useffn,
                     full_context_alignment=full_context_alignment,
                     alignment_heads=alignment_heads,
@@ -487,7 +527,9 @@ class TransformerDecoder(TransformerDecoderBase):
                     parallel_residual=parallel_residual,
                     shared_layer_norm=shared_layer_norm,
                     layer_norm=layer_norm,
+                    norm_eps=norm_eps,
                     use_ckpting=use_ckpting,
+                    parallel_gpu=parallel_gpu,
                 )
                 for i in range(num_layers)
             ]
@@ -533,6 +575,7 @@ class TransformerDecoder(TransformerDecoderBase):
         tgt_pad_mask = tgt[:, :, 0].eq(pad_idx).unsqueeze(1)  # [B, 1, T_tgt]
 
         with_align = kwargs.pop("with_align", False)
+        return_attn = with_align or self._copy
         attn_aligns = []
 
         for layer in self.transformer_layers:
@@ -543,6 +586,7 @@ class TransformerDecoder(TransformerDecoderBase):
                 tgt_pad_mask,
                 step=step,
                 with_align=with_align,
+                return_attn=return_attn,
             )
             if attn_align is not None:
                 attn_aligns.append(attn_align)
@@ -595,7 +639,9 @@ class TransformerLMDecoderLayer(TransformerDecoderLayerBase):
          See TransformerDecoderLayerBase
     """
 
-    def _forward(self, layer_in, tgt_pad_mask, step=None, future=False):
+    def _forward(
+        self, layer_in, tgt_pad_mask, step=None, future=False, return_attn=False
+    ):
         """A naive forward pass for transformer decoder.
 
         # T: could be 1 in the case of stepwise decoding or tgt_len
@@ -606,6 +652,7 @@ class TransformerLMDecoderLayer(TransformerDecoderLayerBase):
             layer_cache (dict or None): cached layer info when stepwise decode
             step (int or None): stepwise decoding counter
             future (bool): If set True, do not apply future_mask.
+            return_attn (bool): If set True return attn
 
         Returns:
             (FloatTensor, FloatTensor):
@@ -626,7 +673,9 @@ class TransformerLMDecoderLayer(TransformerDecoderLayerBase):
 
         norm_layer_in = self.layer_norm_1(layer_in)
 
-        attn_output, attns = self._forward_self_attn(norm_layer_in, dec_mask, step)
+        attn_output, attns = self._forward_self_attn(
+            norm_layer_in, dec_mask, step, return_attn=return_attn
+        )
 
         if self.parallel_residual:
             # feed_forward applies residual, so we remove and apply residual with un-normed
@@ -660,6 +709,8 @@ class TransformerLMDecoder(TransformerDecoderBase):
              embeddings to use, should have positional encodings
          max_relative_positions (int):
              Max distance between inputs in relative positions representations
+         relative_positions_buckets (int):
+             Number of buckets when using Relative positions bias
          aan_useffn (bool): Turn on the FFN layer in the AAN decoder
          add_qkvbias (bool): whether to add bias to the Key/Value nn.Linear
     """
@@ -676,6 +727,7 @@ class TransformerLMDecoder(TransformerDecoderBase):
         attention_dropout,
         embeddings,
         max_relative_positions,
+        relative_positions_buckets,
         aan_useffn,
         full_context_alignment=None,
         alignment_layer=None,
@@ -687,10 +739,12 @@ class TransformerLMDecoder(TransformerDecoderBase):
         parallel_residual=False,
         shared_layer_norm=False,
         layer_norm="standard",
+        norm_eps=1e-6,
         use_ckpting=[],
+        parallel_gpu=1,
     ):
         super(TransformerLMDecoder, self).__init__(
-            d_model, copy_attn, embeddings, alignment_layer, layer_norm
+            d_model, copy_attn, embeddings, alignment_layer, layer_norm, norm_eps
         )
         self.transformer_layers = nn.ModuleList(
             [
@@ -702,6 +756,7 @@ class TransformerLMDecoder(TransformerDecoderBase):
                     attention_dropout,
                     self_attn_type=self_attn_type,
                     max_relative_positions=max_relative_positions,
+                    relative_positions_buckets=relative_positions_buckets,
                     aan_useffn=aan_useffn,
                     full_context_alignment=None,
                     alignment_heads=None,
@@ -712,7 +767,9 @@ class TransformerLMDecoder(TransformerDecoderBase):
                     parallel_residual=parallel_residual,
                     shared_layer_norm=shared_layer_norm,
                     layer_norm=layer_norm,
+                    norm_eps=norm_eps,
                     use_ckpting=use_ckpting,
+                    parallel_gpu=parallel_gpu,
                 )
                 for i in range(num_layers)
             ]
@@ -743,6 +800,7 @@ class TransformerLMDecoder(TransformerDecoderBase):
         tgt_pad_mask = tgt[:, :, 0].eq(pad_idx).unsqueeze(1)  # [B, 1, T_tgt]
 
         with_align = kwargs.pop("with_align", False)
+        return_attn = with_align or self._copy
         assert not with_align, "TransformerLMDecoder does not support align"
 
         for layer in self.transformer_layers:
@@ -751,6 +809,7 @@ class TransformerLMDecoder(TransformerDecoderBase):
                 tgt_pad_mask,
                 step=step,
                 with_align=with_align,
+                return_attn=return_attn,
             )
 
         dec_out = self.layer_norm(dec_out)

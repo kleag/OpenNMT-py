@@ -35,13 +35,16 @@ class TransformerEncoderLayer(nn.Module):
         dropout,
         attention_dropout,
         max_relative_positions=0,
+        relative_positions_buckets=0,
         pos_ffn_activation_fn=ActivationFunction.relu,
         add_qkvbias=False,
         num_kv=0,
         add_ffnbias=True,
         parallel_residual=False,
         layer_norm="standard",
+        norm_eps=1e-6,
         use_ckpting=[],
+        parallel_gpu=1,
     ):
         super(TransformerEncoderLayer, self).__init__()
 
@@ -49,11 +52,14 @@ class TransformerEncoderLayer(nn.Module):
             heads,
             d_model,
             dropout=attention_dropout,
+            is_decoder=False,
             max_relative_positions=max_relative_positions,
+            relative_positions_buckets=relative_positions_buckets,
             attn_type="self",
             add_qkvbias=add_qkvbias,
             num_kv=num_kv,
             use_ckpting=use_ckpting,
+            parallel_gpu=parallel_gpu,
         )
         self.feed_forward = PositionwiseFeedForward(
             d_model,
@@ -63,13 +69,15 @@ class TransformerEncoderLayer(nn.Module):
             add_ffnbias,
             parallel_residual,
             layer_norm,
+            norm_eps,
             use_ckpting=use_ckpting,
+            parallel_gpu=parallel_gpu,
         )
         self.parallel_residual = parallel_residual
         if layer_norm == "standard":
-            self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
+            self.layer_norm = nn.LayerNorm(d_model, eps=norm_eps)
         elif layer_norm == "rms":
-            self.layer_norm = RMSNorm(d_model, eps=1e-6)
+            self.layer_norm = RMSNorm(d_model, eps=norm_eps)
         else:
             raise ValueError(f"{layer_norm} layer norm type is not supported")
         self.dropout = nn.Dropout(dropout)
@@ -141,13 +149,16 @@ class TransformerEncoder(EncoderBase):
         attention_dropout,
         embeddings,
         max_relative_positions,
+        relative_positions_buckets,
         pos_ffn_activation_fn=ActivationFunction.relu,
         add_qkvbias=False,
         num_kv=0,
         add_ffnbias=True,
         parallel_residual=False,
         layer_norm="standard",
+        norm_eps=1e-6,
         use_ckpting=[],
+        parallel_gpu=1,
     ):
         super(TransformerEncoder, self).__init__()
 
@@ -161,21 +172,24 @@ class TransformerEncoder(EncoderBase):
                     dropout,
                     attention_dropout,
                     max_relative_positions=max_relative_positions,
+                    relative_positions_buckets=relative_positions_buckets,
                     pos_ffn_activation_fn=pos_ffn_activation_fn,
                     add_qkvbias=add_qkvbias,
                     num_kv=num_kv,
                     add_ffnbias=add_ffnbias,
                     parallel_residual=parallel_residual,
                     layer_norm=layer_norm,
+                    norm_eps=norm_eps,
                     use_ckpting=use_ckpting,
+                    parallel_gpu=parallel_gpu,
                 )
                 for i in range(num_layers)
             ]
         )
         if layer_norm == "standard":
-            self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
+            self.layer_norm = nn.LayerNorm(d_model, eps=norm_eps)
         elif layer_norm == "rms":
-            self.layer_norm = RMSNorm(d_model, eps=1e-6)
+            self.layer_norm = RMSNorm(d_model, eps=norm_eps)
         else:
             raise ValueError(f"{layer_norm} layer norm type is not supported")
 
@@ -193,13 +207,18 @@ class TransformerEncoder(EncoderBase):
             else opt.attention_dropout,
             embeddings,
             opt.max_relative_positions,
+            opt.relative_positions_buckets,
             pos_ffn_activation_fn=opt.pos_ffn_activation_fn,
             add_qkvbias=opt.add_qkvbias,
             num_kv=opt.num_kv,
             add_ffnbias=opt.add_ffnbias,
             parallel_residual=opt.parallel_residual,
             layer_norm=opt.layer_norm,
+            norm_eps=opt.norm_eps,
             use_ckpting=opt.use_ckpting,
+            parallel_gpu=opt.world_size
+            if opt.parallel_mode == "tensor_parallel"
+            else 1,
         )
 
     def forward(self, src, src_len=None):
@@ -211,10 +230,10 @@ class TransformerEncoder(EncoderBase):
         # mask is now (batch x 1 x slen x slen)
         # 1 to be expanded to number of heads in MHA
         # Run the forward pass of every layer of the tranformer.
+
         for layer in self.transformer:
             enc_out = layer(enc_out, mask)
         enc_out = self.layer_norm(enc_out)
-
         return enc_out, None, src_len
 
     def update_dropout(self, dropout, attention_dropout):
